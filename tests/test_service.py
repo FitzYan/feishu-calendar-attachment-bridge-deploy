@@ -114,6 +114,31 @@ class Fixture(unittest.TestCase):
         with self.assertRaisesRegex(s.Failure,'calendar_not_editable'):self.run_sync()
         self.assertEqual(self.api.uploads,0)
 
+    def test_rich_text_event_and_calendar_bindings(self):
+        self.cfg.bound_event_field='日程 ID';self.cfg.bound_calendar_field='日历 ID'
+        self.api.values['日程 ID']=[{'type':'text','text':'event'},{'type':'text','text':'_0'}]
+        self.api.values['日历 ID']=[{'type':'text','text':'cal@example.com'}]
+        self.assertTrue(self.run_sync()['verified'])
+
+    def test_mentions_cannot_pass_event_binding(self):
+        self.cfg.bound_event_field='日程 ID'
+        self.api.values['日程 ID']=[{'type':'mention','text':'event_0'}]
+        with self.assertRaisesRegex(s.Failure,'binding_mismatch'):self.run_sync()
+        self.assertEqual(self.api.uploads,0)
+
+    def test_writeback_readback_accepts_text_runs(self):
+        self.cfg.event_field='日程 ID';self.cfg.calendar_field='日历 ID';self.cfg.job_field='任务 ID'
+        original=self.api.api
+        def rich_read(method,path,**kwargs):
+            result=original(method,path,**kwargs)
+            if path.endswith('/records/batch_get'):
+                for values in (x['fields'] for x in result['records']):
+                    for key in ('日程 ID','日历 ID','任务 ID'):
+                        if key in values:values[key]=[{'type':'text','text':values[key]}]
+            return result
+        self.api.api=rich_read
+        self.assertTrue(self.run_sync()['verified'])
+
     def test_forbidden_record_denied(self):
         self.api.forbidden=True
         with self.assertRaisesRegex(s.Failure,'record_missing_or_forbidden'):self.run_sync()
@@ -193,6 +218,15 @@ class Fixture(unittest.TestCase):
         self.assertEqual(client.post('/webhooks/attachments',json={**self.body,'calendar_id':'evil'},headers=headers).status_code,400)
         self.assertEqual(client.post('/webhooks/attachments',json={**self.body,'download_url':'https://evil'},headers=headers).status_code,400)
         self.assertEqual(client.post('/webhooks/attachments',data='x'*40000,headers={**headers,'Content-Type':'application/json'}).status_code,413)
+
+    def test_authenticated_raw_json_with_sender_content_type(self):
+        app=s.create_app(self.cfg,self.store,self.api,types.SimpleNamespace())
+        client=app.test_client()
+        headers={'Authorization':'Bearer '+self.cfg.webhook_secret,'Content-Type':'text/plain'}
+        self.assertEqual(client.post('/webhooks/attachments',data=json.dumps(self.body),headers=headers).status_code,202)
+        self.assertEqual(client.post('/webhooks/attachments',data='not json',headers=headers).status_code,400)
+        self.assertEqual(client.post('/webhooks/attachments',data=json.dumps(self.body),content_type='text/plain').status_code,401)
+        self.assertEqual(client.post('/webhooks/attachments',data='x'*40000,headers=headers).status_code,413)
 
     def test_durable_queue_claim(self):
         job,_=self.store.enqueue(self.body,10)

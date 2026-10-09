@@ -1,23 +1,15 @@
 # Feishu Calendar Attachment Bridge
 
-Receives authenticated Bitable workflow HTTP requests, downloads PDF/Word attachments, uploads fresh calendar-scoped media, and updates only event attachments. Durable encrypted queue and token mappings use a single SQLite worker. Never put app secrets, user tokens, candidate records or resume files in this repository.
+Authenticated Bitable webhook → download PDF/Word → upload fresh calendar-scoped media → PATCH only merged attachments → verify event and optional record writeback. Encrypted durable SQLite queue and token mapping, single worker. Keep credentials, tenant configuration, records and files out of Git.
 
-## Render deployment
+## Deploy
 
-- Runtime: Python 3, Python 3.12.
-- Build command: `pip install -r requirements.lock.txt`.
-- Start command: `python service.py serve`.
-- Health check: `/healthz` (process/worker health only).
-- One service instance, persistent disk mount `/var/data`, `DATA_DIR=/var/data/bridge`, `HOST=0.0.0.0`.
-- Configure secrets and the target Base/table/calendar using `.env.example`, within server environment settings. User OAuth is required to edit a native workflow event on its organizer's calendar unless the bot has adequate actual access.
-- Register `https://<actual-service>.onrender.com/oauth/callback` as the exact Feishu redirect URI. Generate authorization URL with `python service.py oauth-url` in the service shell, and authorize the organizer user. Tokens are encrypted in the persistent disk.
-- POST `/webhooks/attachments`, header `Authorization: Bearer <WEBHOOK_SECRET>`, JSON `{ "mode": "attach", "record_id": "rec...", "calendar_id": "feishu.cn_...@group.calendar.feishu.cn", "event_id": "..._0" }`.
-- Poll authenticated GET `/jobs/<job_id>` until `succeeded`, `verified=true`. HTTP 202 is queue acceptance only.
+Use Python 3.12 and a persistent filesystem. `docker compose up -d --build` starts the service from the example compose file. Configure `.env.example`, a private persistent volume, a trusted HTTPS reverse proxy and the organizer user's OAuth redirect URI. Register that exact URI in Feishu, then run `python service.py oauth-url` on the server. Existing Aliyun/Docker hosting can be reused; Render is optional and its ephemeral free filesystem is unsuitable for this SQLite service.
 
-Render free instances lose local SQLite data on restart and spin-down. Production requires a paid instance with a persistent disk or a deliberate migration to a durable external datastore. Do not deploy the current SQLite version on an ephemeral filesystem.
+POST `/webhooks/attachments` with `Authorization: Bearer <WEBHOOK_SECRET>` and a JSON body containing mode=attach, record_id, calendar_id, event_id. Configure Content-Type=application/json; authenticated raw JSON is also parsed when workflow sender headers differ. Authentication, strict schema and 32 KiB limit remain required. HTTP 202 means queued; GET `/jobs/<job_id>` with the same key until succeeded. The worker optionally writes and reads back success fields; it does not automatically write failure state. Preserve the native create-event node and save its IDs before the webhook.
 
-## Local checks
+## Validation
 
-`python -m unittest discover -s tests -v`
+`python -m unittest discover -s tests -v`: 33 tests. The actual native button, synthetic Bitable PDF/Word download, fresh calendar upload, event attachments and record writeback were verified on existing hosting; restart replay reused the job without new uploads. Old attachments and other event properties were checked separately. Separate interviewer access, expiry-driven live OAuth refresh and platform failure/maximum-size scenarios remain unverified. API-create mode is optional and disabled in that deployment.
 
-See `API-VERIFICATION.md` for API limits, partial real testing and unverified business-chain acceptance. Synthetic API tests do not establish resume-download permissions or interviewer access.
+See `.env.example`, `API-VERIFICATION.md`, generic nginx/systemd examples, and `tools.py`. Never commit app secrets, user tokens, databases or resumes. A user token may include historical grants for the same app; application-side target allowlists do not reduce the token's granted scope.

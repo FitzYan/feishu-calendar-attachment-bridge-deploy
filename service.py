@@ -47,6 +47,14 @@ class Failure(Exception):
         self.code, self.retry = code, retry
 
 
+def record_scalar(value):
+    # batch_get returns plain text as text runs; IDs must contain no mentions or links.
+    if isinstance(value, list) and all(isinstance(x, dict) and x.get('type') == 'text'
+                                       and isinstance(x.get('text'), str) for x in value):
+        return ''.join(x['text'] for x in value)
+    return value
+
+
 class Config:
     def __init__(self):
         load_dotenv()
@@ -460,7 +468,7 @@ class Sync:
         if body['mode'] == 'attach' and (self.cfg.bound_event_field or self.cfg.bound_calendar_field):
             saved_fields = self.record(body['record_id'])
             for field,value in ((self.cfg.bound_event_field,body['event_id']), (self.cfg.bound_calendar_field,cal)):
-                if field and saved_fields.get(field) != value:
+                if field and record_scalar(saved_fields.get(field)) != value:
                     raise Failure('record_event_binding_mismatch')
         source = self.attachments(body['record_id'])  # validate everything before create/upload
         if body['mode'] == 'create':
@@ -535,7 +543,7 @@ class Sync:
             # PUT updates only supplied fields, never the attachment field or the entire source record.
             self.api.api('PUT', self.root + '/records/' + segment(body['record_id']), json={'fields':fields})
             readback = self.record(body['record_id'])
-            if any(readback.get(k) != v for k,v in fields.items()):
+            if any(record_scalar(readback.get(k)) != v for k,v in fields.items()):
                 raise Failure('writeback_readback_mismatch', True)
         return result
 
@@ -653,9 +661,12 @@ def create_app(cfg,store,api,worker):
     def webhook():
         if not authorized(cfg.webhook_secret):
             return jsonify(error='unauthorized'),401
-        if not request.is_json:
-            return jsonify(error='json_required'),415
-        body=validate_payload(request.get_json(),cfg)
+        # Workflow senders may label raw JSON as text. Bearer authentication,
+        # the 32 KiB limit and strict payload validation still apply.
+        parsed=request.get_json(force=True,silent=True)
+        if parsed is None:
+            return jsonify(error='json_required'),400
+        body=validate_payload(parsed,cfg)
         job_id,new=store.enqueue(body,cfg.max_queue)
         state=store.result(job_id)
         return jsonify(job_id=job_id,state=state['state'],accepted=new),202
