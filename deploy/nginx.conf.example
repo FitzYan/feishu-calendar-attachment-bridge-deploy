@@ -1,0 +1,24 @@
+# 将此 server 内容合并到已有 HTTPS 站点。替换域名和证书路径。
+limit_req_zone $binary_remote_addr zone=bridge_limit:10m rate=5r/s;
+server {
+    listen 443 ssl;
+    server_name calendar-bridge.example.com;
+    ssl_certificate /etc/letsencrypt/live/calendar-bridge.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/calendar-bridge.example.com/privkey.pem;
+    client_max_body_size 32k;
+    # 禁止记录 OAuth code/state、HTTP 参数和简历信息。
+    access_log off;
+    error_log /var/log/nginx/calendar-bridge-error.log crit;
+    location / {
+        limit_req zone=bridge_limit burst=20 nodelay;
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 15s;
+    }
+    # 管理重试只能从服务器本机发起。按需改为公司 VPN 网段。
+    location /admin/ {
+        deny all;
+    }
+}

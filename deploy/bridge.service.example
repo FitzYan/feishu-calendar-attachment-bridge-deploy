@@ -1,0 +1,23 @@
+[Unit]
+Description=Feishu Calendar Attachment Bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=bridge
+Group=bridge
+WorkingDirectory=/opt/feishu-calendar-attachments
+EnvironmentFile=/opt/feishu-calendar-attachments/.env
+ExecStart=/opt/feishu-calendar-attachments/.venv/bin/python service.py serve
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/feishu-calendar-attachments/data
+
+[Install]
+WantedBy=multi-user.target
