@@ -1,5 +1,6 @@
 """Single-instance durable Feishu attachment bridge. No resume bytes are stored on disk."""
 import argparse
+import copy
 import fcntl
 import hashlib
 import hmac
@@ -77,6 +78,7 @@ class Config:
         self.calendar_field = os.getenv('CALENDAR_ID_FIELD', '')
         self.bound_event_field = os.getenv('BOUND_EVENT_ID_FIELD', '')
         self.bound_calendar_field = os.getenv('BOUND_CALENDAR_ID_FIELD', '')
+        self.stage_fields = json.loads(os.getenv('STAGE_FIELDS_JSON', '{}'))
         self.redirect_uri = os.getenv('OAUTH_REDIRECT_URI', '')
         self.scopes = os.getenv('OAUTH_SCOPES', 'bitable:app:readonly docs:document.media:download docs:document.media:upload calendar:calendar:read calendar:calendar.event:read calendar:calendar.event:update offline_access')
         self.max_attempts = 6
@@ -97,6 +99,19 @@ class Config:
         write_fields = [x for x in (self.status_field,self.job_field,self.event_field,self.calendar_field) if x]
         if len(set(write_fields)) != len(write_fields) or set(write_fields) & set(self.fields):
             raise Failure('writeback_field_mapping_conflict')
+        if not isinstance(self.stage_fields, dict):
+            raise Failure('stage_fields_invalid')
+        used_fields = set(write_fields)
+        for stage, mapping in self.stage_fields.items():
+            keys = {'status_field','job_field','event_field','calendar_field','bound_event_field','bound_calendar_field'}
+            if not isinstance(stage,str) or not re.fullmatch(r'[a-z][a-z0-9_]{0,31}',stage) or not isinstance(mapping,dict) or set(mapping) != keys:
+                raise Failure('stage_fields_invalid')
+            if not all(isinstance(v,str) and v.strip() for v in mapping.values()):
+                raise Failure('stage_fields_invalid')
+            fields = [mapping[k] for k in ('status_field','job_field','event_field','calendar_field')]
+            if len(set(fields)) != 4 or set(fields) & (used_fields | set(self.fields)) or mapping['bound_event_field'] != mapping['event_field'] or mapping['bound_calendar_field'] != mapping['calendar_field']:
+                raise Failure('stage_fields_overlap_or_binding_invalid')
+            used_fields.update(fields)
         if self.retention_days < 1:
             raise Failure('retention_invalid')
         if self.auth_mode == 'user' and not self.redirect_uri.startswith('https://'):
@@ -146,6 +161,8 @@ class Store:
     def enqueue(self, body, max_queue):
         # Existing mode has a stable event target; create mode requires a persisted request_id.
         logical = [body['mode'], body['record_id'], body['calendar_id'], body.get('event_id'), body.get('request_id', '')]
+        if 'stage' in body:
+            logical.append(body['stage'])
         job_id, fingerprint = digest(canonical(logical)), digest(canonical(body))
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
@@ -332,10 +349,12 @@ class Feishu:
 
 
 def validate_payload(body, cfg):
-    if not isinstance(body, dict) or set(body) - {'mode','record_id','calendar_id','event_id','request_id','event','attendee_open_ids'}:
+    if not isinstance(body, dict) or set(body) - {'mode','record_id','calendar_id','event_id','request_id','event','attendee_open_ids','stage'}:
         raise Failure('payload_invalid')
     b = dict(body)
     b.setdefault('mode', 'attach')
+    if 'stage' in b and (not isinstance(b['stage'],str) or b['stage'] not in getattr(cfg,'stage_fields',{}) or b['mode'] != 'attach'):
+        raise Failure('stage_not_allowed')
     for name in ('record_id', 'calendar_id'):
         if not isinstance(b.get(name), str) or not b[name] or len(b[name]) > 256:
             raise Failure('payload_' + name + '_invalid')
@@ -462,6 +481,18 @@ class Sync:
         return e
 
     def run(self, job_id, body):
+        if 'stage' in body:
+            stage = body['stage']
+            mappings = getattr(self.cfg,'stage_fields',{})
+            if not isinstance(stage,str) or stage not in mappings or body['mode'] != 'attach':
+                raise Failure('stage_not_allowed')
+            routed = copy.copy(self.cfg)
+            for key,value in mappings[stage].items():
+                setattr(routed,key,value)
+            return Sync(routed,self.store,self.api)._run(job_id,body)
+        return self._run(job_id,body)
+
+    def _run(self, job_id, body):
         cal = body['calendar_id']
         self.calendar_check(cal)
         collection = '/calendar/v4/calendars/' + segment(cal) + '/events'

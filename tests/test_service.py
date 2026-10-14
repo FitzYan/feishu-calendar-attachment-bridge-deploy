@@ -67,7 +67,7 @@ class Fixture(unittest.TestCase):
             app_id='cli_test',auth_mode='tenant',base='baseTest',table='tblABC',fields=['候选人简历'],
             calendars=['cal@example.com'],allow_create=True,status_field='',job_field='',event_field='',calendar_field='',bound_event_field='',bound_calendar_field='',
             webhook_secret='w'*40,admin_secret='a'*40,max_queue=10,max_attempts=3,retention_days=30,
-            secret='privateSecret',parent_type='calendar',redirect_uri='https://example.com/oauth/callback')
+            secret='privateSecret',parent_type='calendar',redirect_uri='https://example.com/oauth/callback',stage_fields={})
         self.store=s.Store(self.cfg);self.api=FakeFeishu();self.sync=s.Sync(self.cfg,self.store,self.api)
         self.body={'mode':'attach','record_id':'recABC','calendar_id':'cal@example.com','event_id':'event_0','request_id':'v1'}
 
@@ -113,6 +113,43 @@ class Fixture(unittest.TestCase):
         self.api.role='reader'
         with self.assertRaisesRegex(s.Failure,'calendar_not_editable'):self.run_sync()
         self.assertEqual(self.api.uploads,0)
+
+    def final_stage(self):
+        self.cfg.stage_fields={'final':{'status_field':'终面状态','job_field':'终面任务','event_field':'终面日程','calendar_field':'终面日历','bound_event_field':'终面日程','bound_calendar_field':'终面日历'}}
+
+    def test_final_stage_writes_only_final_fields_without_mutating_initial_config(self):
+        self.final_stage()
+        self.cfg.status_field='初试状态';self.cfg.bound_event_field='初试日程'
+        self.api.values.update({'初试状态':'同步成功','初试日程':'initial_0','终面日程':[{'type':'text','text':'event_0'}],'终面日历':'cal@example.com'})
+        result=self.sync.run(s.digest('final'),{**self.body,'stage':'final'})
+        self.assertTrue(result['verified']);self.assertEqual(self.api.values['终面状态'],'同步成功')
+        self.assertEqual(self.api.values['初试状态'],'同步成功');self.assertEqual(self.api.values['初试日程'],'initial_0')
+        self.assertEqual(self.cfg.bound_event_field,'初试日程');self.assertEqual(self.cfg.status_field,'初试状态')
+        with self.assertRaisesRegex(s.Failure,'binding_mismatch'):self.run_sync()
+
+    def test_final_stage_cannot_use_initial_binding_or_unknown_stage(self):
+        self.final_stage();self.api.values.update({'初试日程':'event_0','终面日程':'other_0','终面日历':'cal@example.com'})
+        with self.assertRaisesRegex(s.Failure,'binding_mismatch'):
+            self.sync.run(s.digest('final'),{**self.body,'stage':'final'})
+        self.assertEqual(self.api.uploads,0)
+        for stage in ['initial','anything',None,{},['final']]:
+            with self.assertRaisesRegex(s.Failure,'stage_not_allowed'):s.validate_payload({**self.body,'stage':stage},self.cfg)
+        with self.assertRaisesRegex(s.Failure,'stage_not_allowed'):s.validate_payload({**self.body,'stage':'final','mode':'create'},self.cfg)
+
+    def test_stage_dedupe_preserves_existing_initial_job_ids(self):
+        old_id=s.digest(s.canonical([self.body['mode'],self.body['record_id'],self.body['calendar_id'],self.body['event_id'],self.body['request_id']]))
+        self.assertEqual(self.store.enqueue(self.body,10),(old_id,True))
+        final_id,new=self.store.enqueue({**self.body,'stage':'final'},10)
+        self.assertTrue(new);self.assertNotEqual(final_id,old_id)
+        self.assertEqual(self.store.enqueue({**self.body,'stage':'final'},10),(final_id,False))
+
+    def test_stage_config_rejects_writeback_overlap_and_wrong_binding(self):
+        self.final_stage();s.Config.validate(self.cfg)
+        self.cfg.status_field='终面状态'
+        with self.assertRaisesRegex(s.Failure,'overlap'):s.Config.validate(self.cfg)
+        self.cfg.status_field=''
+        self.cfg.stage_fields['final']['bound_event_field']='初试日程'
+        with self.assertRaisesRegex(s.Failure,'binding_invalid'):s.Config.validate(self.cfg)
 
     def test_rich_text_event_and_calendar_bindings(self):
         self.cfg.bound_event_field='日程 ID';self.cfg.bound_calendar_field='日历 ID'
